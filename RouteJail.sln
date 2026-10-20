@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sidecar", "Sidecar\Sidecar.csproj", "{42D4D926-7B4D-4CCF-8216-DDA07A5B2DE5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Router", "Router\Router.csproj", "{A506B05C-BE74-4186-B7CF-A6AE74AFEF7F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Shared", "Shared\Shared.csproj", "{6A0E2483-78EA-4629-B21A-ACCAA9C0FFE7}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{42D4D926-7B4D-4CCF-8216-DDA07A5B2DE5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{42D4D926-7B4D-4CCF-8216-DDA07A5B2DE5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{42D4D926-7B4D-4CCF-8216-DDA07A5B2DE5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{42D4D926-7B4D-4CCF-8216-DDA07A5B2DE5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A506B05C-BE74-4186-B7CF-A6AE74AFEF7F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A506B05C-BE74-4186-B7CF-A6AE74AFEF7F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A506B05C-BE74-4186-B7CF-A6AE74AFEF7F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A506B05C-BE74-4186-B7CF-A6AE74AFEF7F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6A0E2483-78EA-4629-B21A-ACCAA9C0FFE7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6A0E2483-78EA-4629-B21A-ACCAA9C0FFE7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6A0E2483-78EA-4629-B21A-ACCAA9C0FFE7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6A0E2483-78EA-4629-B21A-ACCAA9C0FFE7}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

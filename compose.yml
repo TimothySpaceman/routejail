@@ -1,0 +1,30 @@
+services:
+  router:
+    build:
+      context: .
+      dockerfile: Router/Dockerfile
+    command: "dotnet Router.dll --Router:SocketPath=/run/rjail/router.sock"
+    volumes:
+      - rjail:/run/rjail
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/rjail/router.sock"]
+      interval: 1s
+      retries: 30
+
+  sidecar:
+    build:
+      context: .
+      dockerfile: Sidecar/Dockerfile
+    command: "dotnet Sidecar.dll --Sidecar:SocketPath=/run/rjail/router.sock"
+    volumes:
+      - rjail:/run/rjail
+    depends_on:
+      router:
+        condition: service_healthy
+
+volumes:
+  rjail:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
