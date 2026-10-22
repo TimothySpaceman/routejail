@@ -1,4 +1,6 @@
 using System.Net.Sockets;
+using Shared;
+using Shared.Channels;
 using Shared.Control;
 using Shared.Frames;
 using Shared.Transport;
@@ -55,7 +57,7 @@ public sealed class SidecarWorker : BackgroundService
         var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), ct);
 
-        await using var transport = new SocketTransport(socket, false);
+        await using var transport = new Transport(socket, false);
 
         FrameCodec.Write(transport.Output, new Frame.Connect());
         await transport.Output.FlushAsync(ct);
@@ -70,6 +72,28 @@ public sealed class SidecarWorker : BackgroundService
         var n = await control.Remote.GetRandomNumberFromRouter(ct);
         _log.LogInformation("Router says {N}", n);
 
+        await using var data = await OpenDataChannelAsync("127.0.0.1", 9000, ct);
+        await Producer.RunAsync(data, 10_000_000, ct); // TEMP
+        
         await control.Completed.WaitAsync(ct);
+    }
+    
+    public async Task<ITransport> OpenDataChannelAsync(string host, int port, CancellationToken ct)
+    {
+        var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        try
+        {
+            await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), ct);
+
+            var transport = new Transport(socket, true);
+            FrameCodec.Write(transport.Output, new Frame.Open(host, port));
+            await transport.Output.FlushAsync(ct);
+            return transport;
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
     }
 }

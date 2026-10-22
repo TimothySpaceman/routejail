@@ -1,7 +1,7 @@
 using System.IO.Pipelines;
 using StreamJsonRpc;
 
-namespace Shared.Control;
+namespace Shared.Channels;
 
 public class ControlChannel<TLocal, TRemote> : IAsyncDisposable where TLocal : class where TRemote : class
 {

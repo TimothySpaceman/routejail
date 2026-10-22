@@ -1,6 +1,9 @@
 using System.Collections.Concurrent;
 using System.Net.Sockets;
+using Router.Channels;
 using Router.Control;
+using Shared;
+using Shared.Channels;
 using Shared.Control;
 using Shared.Frames;
 using Shared.Transport;
@@ -27,6 +30,7 @@ public sealed class RouterWorker : BackgroundService
         listener.Bind(new UnixDomainSocketEndPoint(_path));
         listener.Listen(16);
         _log.LogInformation("Listening on {Path}", _path);
+        _ = Consumer.RunAsync(9000, stoppingToken); // TEMP
 
         try
         {
@@ -51,7 +55,7 @@ public sealed class RouterWorker : BackgroundService
 
     private static async Task HandleConnectionAsync(Socket socket, CancellationToken ct)
     {
-        var transport = new SocketTransport(socket, true);
+        var transport = new Transport(socket, true);
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -74,11 +78,33 @@ public sealed class RouterWorker : BackgroundService
                     break;
                 }
 
-                case Frame.Open:
-                    throw new NotImplementedException();
+                // case Frame.Open:
+                //     throw new NotImplementedException();
+                case Frame.Open open:
+                {
+                    timeout.CancelAfter(TimeSpan.FromSeconds(5)); // restart the clock for the outbound connect
+
+                    var outbound = new Socket(SocketType.Stream, ProtocolType.Tcp);
+                    try
+                    {
+                        await outbound.ConnectAsync(open.Host, open.Port, timeout.Token);
+                    }
+                    catch
+                    {
+                        outbound.Dispose();
+                        throw;
+                    }
+
+                    timeout.CancelAfter(Timeout.InfiniteTimeSpan);
+
+                    await using var upstream = new Transport(outbound, true);
+                    var channel = DataChannel.Start(transport, upstream, ct);
+                    await channel.Transferring;
+                    break;
+                }
             }
         }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or OperationCanceledException)
+        catch (Exception ex) when (ex is IOException or SocketException or InvalidDataException or OperationCanceledException)
         {
             // bad/slow/dropped slave
         }
