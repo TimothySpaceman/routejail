@@ -10,9 +10,24 @@ using Shared.Transport;
 
 namespace Router;
 
+record PeerListener(CancellationTokenSource Cts, Task Running);
+
+record ConnectionEntry(Guid Id, Guid PeerId)
+{
+    public Task Running = Task.CompletedTask;
+}
+
 public sealed class RouterWorker : BackgroundService
 {
-    private readonly ConcurrentDictionary<Task, byte> _connections = new();
+    private readonly ConcurrentDictionary<Guid, PeerListener> _listeners = new();
+
+    private readonly ConcurrentDictionary<Guid, ConnectionEntry> _connections = new();
+
+    private readonly ConcurrentDictionary<Guid, ControlChannel<IRouterControlApi, ISidecarControlApi>>
+        _controlChannels = new();
+
+    private readonly ConcurrentDictionary<Guid, DataChannel> _dataChannels = new();
+
     private readonly ILogger<RouterWorker> _log;
     private readonly string _path;
 
@@ -24,37 +39,80 @@ public sealed class RouterWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (File.Exists(_path)) File.Delete(_path);
-
-        using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-        listener.Bind(new UnixDomainSocketEndPoint(_path));
-        listener.Listen(16);
-        _log.LogInformation("Listening on {Path}", _path);
         _ = Consumer.RunAsync(9000, stoppingToken); // TEMP
+
+        string[] paths = [_path];
+        foreach (var path in paths)
+        {
+            var id = Guid.NewGuid();
+            StartListener(id, path, stoppingToken);
+        }
 
         try
         {
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                var client = await listener.AcceptAsync(stoppingToken);
+            await Task.Delay(Timeout.Infinite, stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+        }
 
-                var task = HandleConnectionAsync(client, stoppingToken);
-                _connections[task] = 0;
-                _ = task.ContinueWith(t => _connections.TryRemove(t, out _), TaskScheduler.Default);
+        await Task.WhenAll(_listeners.Values.Select(l => l.Running));
+    }
+
+    private void StartListener(Guid peerId, string path, CancellationToken ct)
+    {
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _listeners[peerId] = new PeerListener(cts, RunListenerAsync(peerId, path, cts));
+    }
+
+    private async Task StopListenerAsync(Guid peerId)
+    {
+        if (!_listeners.TryRemove(peerId, out var listener)) return;
+        await listener.Cts.CancelAsync();
+        await listener.Running;
+        listener.Cts.Dispose();
+    }
+
+    private async Task RunListenerAsync(Guid peerId, string path, CancellationTokenSource cts)
+    {
+        var ct = cts.Token;
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+            using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            listener.Bind(new UnixDomainSocketEndPoint(path));
+            listener.Listen(16);
+            _log.LogInformation("Listening on {Path} for {Peer}", path, peerId);
+
+            while (!cts.Token.IsCancellationRequested)
+            {
+                var client = await listener.AcceptAsync(ct);
+                var id = Guid.NewGuid();
+                var entry = new ConnectionEntry(id, peerId);
+                _connections[id] = entry;
+                entry.Running = HandleConnectionAsync(entry, client, ct);
             }
         }
         catch (OperationCanceledException)
         {
         }
+        catch (Exception ex)
+        {
+            await cts.CancelAsync();
+            _log.LogError(ex, "Listener for {Peer} failed", peerId);
+        }
         finally
         {
-            await Task.WhenAll(_connections.Keys);
-            File.Delete(_path);
+            await Task.WhenAll(
+                _connections.Values.Where(e => e.PeerId == peerId).Select(e => e.Running)
+            );
+            File.Delete(path);
         }
     }
 
-    private static async Task HandleConnectionAsync(Socket socket, CancellationToken ct)
+    private async Task HandleConnectionAsync(ConnectionEntry entry, Socket socket, CancellationToken ct)
     {
+        var peerId = entry.PeerId;
         var transport = new Transport(socket, true);
         try
         {
@@ -66,51 +124,99 @@ public sealed class RouterWorker : BackgroundService
             {
                 case Frame.Connect:
                 {
-                    await using var control = ControlChannel<IRouterControlApi, ISidecarControlApi>.Start(
-                        transport,
-                        new RouterControlApi()
-                    );
-
-                    var sum = await control.Remote.GetSum(2, 3);
-                    Console.WriteLine($"sidecar says 2+3={sum}");
-
-                    await control.Completed;
+                    if (_controlChannels.ContainsKey(peerId)) break;
+                    await HandleControlConnectionAsync(peerId, transport, ct);
                     break;
                 }
 
-                // case Frame.Open:
-                //     throw new NotImplementedException();
                 case Frame.Open open:
                 {
-                    timeout.CancelAfter(TimeSpan.FromSeconds(5)); // restart the clock for the outbound connect
-
-                    var outbound = new Socket(SocketType.Stream, ProtocolType.Tcp);
-                    try
-                    {
-                        await outbound.ConnectAsync(open.Host, open.Port, timeout.Token);
-                    }
-                    catch
-                    {
-                        outbound.Dispose();
-                        throw;
-                    }
-
-                    timeout.CancelAfter(Timeout.InfiniteTimeSpan);
-
-                    await using var upstream = new Transport(outbound, true);
-                    var channel = DataChannel.Start(transport, upstream, ct);
-                    await channel.Transferring;
+                    await HandleDataConnectionAsync(peerId, open, transport, timeout, ct);
                     break;
                 }
             }
         }
-        catch (Exception ex) when (ex is IOException or SocketException or InvalidDataException or OperationCanceledException)
+        catch (OperationCanceledException)
         {
-            // bad/slow/dropped slave
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Connection from {Peer} failed", peerId);
+        }
+        // catch (Exception ex) when (
+        //     ex is IOException or SocketException or InvalidDataException or OperationCanceledException
+        // )
+        // {
+        //     // bad/slow/dropped slave
+        // }
+        finally
+        {
+            _connections.TryRemove(entry.Id, out _);
+            await transport.DisposeAsync();
+        }
+    }
+
+    private async Task HandleControlConnectionAsync(Guid peerId, ITransport transport, CancellationToken ct)
+    {
+        await using var control = ControlChannel<IRouterControlApi, ISidecarControlApi>.Start(
+            transport,
+            new RouterControlApi()
+        );
+
+        if (!_controlChannels.TryAdd(peerId, control)) return;
+        try
+        {
+            await control.Completed.WaitAsync(ct);
         }
         finally
         {
-            await transport.DisposeAsync();
+            _controlChannels.TryRemove(KeyValuePair.Create(peerId, control));
+        }
+    }
+
+    private async Task HandleDataConnectionAsync(
+        Guid peerId,
+        Frame.Open frame,
+        ITransport transport,
+        CancellationTokenSource timeout,
+        CancellationToken ct
+    )
+    {
+        var channelId = Guid.NewGuid(); // to hand it to the outbound peer etc
+
+        if (!_controlChannels.TryGetValue(peerId, out var control))
+        {
+            _log.LogError("Cannot establish Data Connection without Control Connection");
+            return;
+        }
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, control.Cts.Token, timeout.Token);
+
+        timeout.CancelAfter(TimeSpan.FromSeconds(5)); // restart the clock for the outbound connect
+        var outbound = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        try
+        {
+            await outbound.ConnectAsync(frame.Host, frame.Port, cts.Token);
+        }
+        catch
+        {
+            outbound.Dispose();
+            throw;
+        }
+
+        timeout.CancelAfter(Timeout.InfiniteTimeSpan);
+        await using var upstream = new Transport(outbound, true);
+
+        await using var channel = DataChannel.Start(transport, upstream, cts.Token);
+        _dataChannels[channelId] = channel;
+        try
+        {
+            await channel.Transferring.WaitAsync(cts.Token);
+            _log.LogInformation("Transfer task returned");
+        }
+        finally
+        {
+            _dataChannels.TryRemove(channelId, out _);
         }
     }
 }

@@ -16,12 +16,7 @@ public class ControlChannel<TLocal, TRemote> : IAsyncDisposable where TLocal : c
     public TRemote Remote { get; }
 
     public Task Completed => _rpc.Completion;
-
-    public ValueTask DisposeAsync()
-    {
-        _rpc.Dispose();
-        return default;
-    }
+    public CancellationTokenSource Cts { get; } = new();
 
     public static ControlChannel<TLocal, TRemote> Start(IDuplexPipe pipe, TLocal localHandler)
     {
@@ -37,5 +32,12 @@ public class ControlChannel<TLocal, TRemote> : IAsyncDisposable where TLocal : c
         rpc.StartListening();
 
         return new ControlChannel<TLocal, TRemote>(rpc, remote);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Cts.Cancel();
+        _rpc.Dispose();
+        return default;
     }
 }

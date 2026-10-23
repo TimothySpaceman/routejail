@@ -4,34 +4,34 @@ using Shared.Transport;
 
 namespace Router.Channels;
 
-public class DataChannel
+public class DataChannel : IAsyncDisposable
 {
     private readonly ITransport _peerA;
     private readonly ITransport _peerB;
+    private readonly CancellationTokenSource _cts;
+    private int _disposed;
 
     public Task Transferring { get; private set; } = Task.CompletedTask;
 
-    private DataChannel(ITransport peerA, ITransport peerB)
+    private DataChannel(ITransport peerA, ITransport peerB, CancellationTokenSource cts)
     {
         _peerA = peerA;
         _peerB = peerB;
+        _cts = cts;
     }
 
     public static DataChannel Start(ITransport peerA, ITransport peerB, CancellationToken ct)
     {
-        var channel = new DataChannel(peerA, peerB);
-        channel.Transferring = channel.RunAsync(ct);
+        var channel = new DataChannel(peerA, peerB, CancellationTokenSource.CreateLinkedTokenSource(ct));
+        channel.Transferring = channel.RunAsync();
         return channel;
     }
 
-    private async Task RunAsync(CancellationToken ct)
+    private async Task RunAsync()
     {
-        // Cancelled when either direction faults, or when the caller cancels
-        using var abort = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
         await Task.WhenAll(
-            TransferData(_peerA.Input, _peerB.Output, abort),
-            TransferData(_peerB.Input, _peerA.Output, abort)
+            TransferData(_peerA.Input, _peerB.Output, _cts),
+            TransferData(_peerB.Input, _peerA.Output, _cts)
         );
     }
 
@@ -75,5 +75,23 @@ public class DataChannel
             await destination.CompleteAsync(error);
             await source.CompleteAsync(error);
         }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+        _cts.Cancel();
+
+        try
+        {
+            await Transferring;
+        }
+        catch
+        {
+            // already observed by whoever awaited Transferring
+        }
+
+        _cts.Dispose();
     }
 }
