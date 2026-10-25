@@ -15,6 +15,7 @@ record PeerListener(CancellationTokenSource Cts, Task Running);
 record ConnectionEntry(Guid Id, Guid PeerId)
 {
     public Task Running = Task.CompletedTask;
+    public volatile DataChannel? Channel;
 }
 
 public sealed class RouterWorker : BackgroundService
@@ -25,8 +26,6 @@ public sealed class RouterWorker : BackgroundService
 
     private readonly ConcurrentDictionary<Guid, ControlChannel<IRouterControlApi, ISidecarControlApi>>
         _controlChannels = new();
-
-    private readonly ConcurrentDictionary<Guid, DataChannel> _dataChannels = new();
 
     private readonly ILogger<RouterWorker> _log;
     private readonly string _path;
@@ -124,14 +123,18 @@ public sealed class RouterWorker : BackgroundService
             {
                 case Frame.Connect:
                 {
-                    if (_controlChannels.ContainsKey(peerId)) break;
+                    if (_controlChannels.ContainsKey(peerId))
+                    {
+                        _log.LogWarning("Peer {Peer} already has a control connection established", peerId);
+                        break;
+                    }
                     await HandleControlConnectionAsync(peerId, transport, ct);
                     break;
                 }
 
                 case Frame.Open open:
                 {
-                    await HandleDataConnectionAsync(peerId, open, transport, timeout, ct);
+                    await HandleDataConnectionAsync(entry, open, transport, timeout, ct);
                     break;
                 }
             }
@@ -143,16 +146,17 @@ public sealed class RouterWorker : BackgroundService
         {
             _log.LogError(ex, "Connection from {Peer} failed", peerId);
         }
-        // catch (Exception ex) when (
-        //     ex is IOException or SocketException or InvalidDataException or OperationCanceledException
-        // )
-        // {
-        //     // bad/slow/dropped slave
-        // }
         finally
         {
             _connections.TryRemove(entry.Id, out _);
-            await transport.DisposeAsync();
+            try
+            {
+                await transport.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Transport dispose failed");
+            }
         }
     }
 
@@ -175,16 +179,14 @@ public sealed class RouterWorker : BackgroundService
     }
 
     private async Task HandleDataConnectionAsync(
-        Guid peerId,
+        ConnectionEntry entry,
         Frame.Open frame,
         ITransport transport,
         CancellationTokenSource timeout,
         CancellationToken ct
     )
     {
-        var channelId = Guid.NewGuid(); // to hand it to the outbound peer etc
-
-        if (!_controlChannels.TryGetValue(peerId, out var control))
+        if (!_controlChannels.TryGetValue(entry.PeerId, out var control))
         {
             _log.LogError("Cannot establish Data Connection without Control Connection");
             return;
@@ -208,15 +210,8 @@ public sealed class RouterWorker : BackgroundService
         await using var upstream = new Transport(outbound, true);
 
         await using var channel = DataChannel.Start(transport, upstream, cts.Token);
-        _dataChannels[channelId] = channel;
-        try
-        {
-            await channel.Transferring.WaitAsync(cts.Token);
-            _log.LogInformation("Transfer task returned");
-        }
-        finally
-        {
-            _dataChannels.TryRemove(channelId, out _);
-        }
+        entry.Channel = channel;
+        await channel.Transferring.WaitAsync(cts.Token);
+        _log.LogInformation("Transfer task returned");
     }
 }
