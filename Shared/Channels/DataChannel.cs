@@ -2,7 +2,7 @@ using System.Buffers;
 using System.IO.Pipelines;
 using Shared.Transport;
 
-namespace Router.Channels;
+namespace Shared.Channels;
 
 public class DataChannel : IAsyncDisposable
 {

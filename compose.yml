@@ -18,6 +18,7 @@ services:
     command: "dotnet Sidecar.dll --Sidecar:SocketPath=/run/rjail/router.sock"
     volumes:
       - rjail:/run/rjail
+    dns: 127.0.0.53
     depends_on:
       router:
         condition: service_healthy

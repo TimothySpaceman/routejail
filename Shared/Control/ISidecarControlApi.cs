@@ -1,6 +1,8 @@
+using Shared.Routing;
+
 namespace Shared.Control;
 
 public interface ISidecarControlApi
 {
-    Task<int> GetSum(int a, int b);
+    Task ApplyRoutes(RouteSnapshot snapshot);
 }

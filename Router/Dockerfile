@@ -12,6 +12,11 @@ RUN dotnet publish Router/Router.csproj \
 
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS final
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends socat \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app/publish .
 
 RUN mkdir -p /run/rjail && chown app:app /run/rjail

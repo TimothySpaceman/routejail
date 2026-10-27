@@ -1,11 +1,10 @@
+using Router.Policies;
 using Shared.Control;
+using Shared.Routing;
 
 namespace Router.Control;
 
-public class RouterControlApi : IRouterControlApi
+public class RouterControlApi(Guid peerId) : IRouterControlApi
 {
-    public async Task<int> GetRandomNumberFromRouter(CancellationToken ct)
-    {
-        return new Random().Next(1024);
-    }
+    public Task<RouteSnapshot> GetRoutes() => Task.FromResult(TempPolicy.SnapshotFor(peerId));
 }

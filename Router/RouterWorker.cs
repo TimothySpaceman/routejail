@@ -1,8 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net.Sockets;
-using Router.Channels;
 using Router.Control;
-using Shared;
+using Router.Policies;
 using Shared.Channels;
 using Shared.Control;
 using Shared.Frames;
@@ -38,12 +37,10 @@ public sealed class RouterWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _ = Consumer.RunAsync(9000, stoppingToken); // TEMP
-
         string[] paths = [_path];
         foreach (var path in paths)
         {
-            var id = Guid.NewGuid();
+            var id = TempPolicy.PeerA;
             StartListener(id, path, stoppingToken);
         }
 
@@ -80,7 +77,7 @@ public sealed class RouterWorker : BackgroundService
             if (File.Exists(path)) File.Delete(path);
             using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             listener.Bind(new UnixDomainSocketEndPoint(path));
-            listener.Listen(16);
+            listener.Listen(64);
             _log.LogInformation("Listening on {Path} for {Peer}", path, peerId);
 
             while (!cts.Token.IsCancellationRequested)
@@ -92,7 +89,7 @@ public sealed class RouterWorker : BackgroundService
                 entry.Running = HandleConnectionAsync(entry, client, ct);
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
         }
         catch (Exception ex)
@@ -164,7 +161,7 @@ public sealed class RouterWorker : BackgroundService
     {
         await using var control = ControlChannel<IRouterControlApi, ISidecarControlApi>.Start(
             transport,
-            new RouterControlApi()
+            new RouterControlApi(peerId)
         );
 
         if (!_controlChannels.TryAdd(peerId, control)) return;
@@ -192,13 +189,19 @@ public sealed class RouterWorker : BackgroundService
             return;
         }
 
+        if (!TempPolicy.TryResolve(entry.PeerId, frame.RouteId, out var dest))
+        {
+            _log.LogWarning("Connection from {Peer} to {Route} is not allowed by current policy", entry.PeerId, frame.RouteId);
+            return;
+        }
+
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, control.Cts.Token, timeout.Token);
 
         timeout.CancelAfter(TimeSpan.FromSeconds(5)); // restart the clock for the outbound connect
         var outbound = new Socket(SocketType.Stream, ProtocolType.Tcp);
         try
         {
-            await outbound.ConnectAsync(frame.Host, frame.Port, cts.Token);
+            await outbound.ConnectAsync(dest.Host, dest.Port, cts.Token);
         }
         catch
         {

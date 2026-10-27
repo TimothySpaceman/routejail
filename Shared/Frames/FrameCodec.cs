@@ -29,7 +29,7 @@ public static class FrameCodec
         return parts[0] switch
         {
             "CONN" when parts.Length == 1 => new Frame.Connect(),
-            "OPEN" when parts.Length == 3 && int.TryParse(parts[2], out var port) => new Frame.Open(parts[1], port),
+            "OPEN" when parts.Length == 2 && Guid.TryParse(parts[1], out var id) => new Frame.Open(id),
             _ => throw new InvalidDataException($"Bad frame: {text}")
         };
     }
@@ -39,7 +39,7 @@ public static class FrameCodec
         var text = frame switch
         {
             Frame.Connect => "CONN;",
-            Frame.Open o => $"OPEN,{o.Host},{o.Port};",
+            Frame.Open o => $"OPEN,{o.RouteId};",
             _ => throw new ArgumentException("Unencodable frame")
         };
 

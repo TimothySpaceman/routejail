@@ -1,6 +1,8 @@
+using Shared.Routing;
+
 namespace Shared.Control;
 
 public interface IRouterControlApi
 {
-    Task<int> GetRandomNumberFromRouter(CancellationToken ct);
+    Task<RouteSnapshot> GetRoutes();
 }

@@ -1,11 +1,14 @@
 using Shared.Control;
+using Shared.Routing;
+using Sidecar.Routing;
 
 namespace Sidecar.Control;
 
-public class SidecarControlApi : ISidecarControlApi
+public class SidecarControlApi(RouteInbox inbox) : ISidecarControlApi
 {
-    public async Task<int> GetSum(int a, int b)
+    public Task ApplyRoutes(RouteSnapshot s)
     {
-        return a + b;
+        inbox.Submit(s);
+        return Task.CompletedTask;
     }
 }

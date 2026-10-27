@@ -1,21 +1,24 @@
 using System.Net.Sockets;
-using Shared;
 using Shared.Channels;
 using Shared.Control;
 using Shared.Frames;
 using Shared.Transport;
 using Sidecar.Control;
+using Sidecar.Dns;
+using Sidecar.Routing;
 
 namespace Sidecar;
 
 public sealed class SidecarWorker : BackgroundService
 {
+    private readonly DnsServer _dns;
     private readonly ILogger<SidecarWorker> _log;
     private readonly string _socketPath;
 
-    public SidecarWorker(IConfiguration config, ILogger<SidecarWorker> log)
+    public SidecarWorker(IConfiguration config, DnsServer dns, ILogger<SidecarWorker> log)
     {
         _socketPath = config["Sidecar:SocketPath"] ?? "/tmp/router.sock";
+        _dns = dns;
         _log = log;
     }
 
@@ -28,7 +31,7 @@ public sealed class SidecarWorker : BackgroundService
             try
             {
                 await RunSessionAsync(stoppingToken);
-                delay = TimeSpan.FromSeconds(1); // it worked, reset backoff
+                delay = TimeSpan.FromSeconds(1);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -56,37 +59,45 @@ public sealed class SidecarWorker : BackgroundService
     {
         var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), ct);
-
         await using var transport = new Transport(socket, false);
 
         FrameCodec.Write(transport.Output, new Frame.Connect());
         await transport.Output.FlushAsync(ct);
 
+        var inbox = new RouteInbox(); // per session
         await using var control = ControlChannel<ISidecarControlApi, IRouterControlApi>.Start(
             transport,
-            new SidecarControlApi()
+            new SidecarControlApi(inbox)
         );
 
-        _log.LogInformation("Connected to router");
+        using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var reconciler = new DnsManager(inbox, _dns, OpenDataChannelAsync, _log);
+        var reconciling = reconciler.RunAsync(sessionCts.Token);
 
-        var n = await control.Remote.GetRandomNumberFromRouter(ct);
-        _log.LogInformation("Router says {N}", n);
-
-        await using var data = await OpenDataChannelAsync("127.0.0.1", 9000, ct);
-        await Producer.RunAsync(data, 10_000_000, ct); // TEMP
-        
-        await control.Completed.WaitAsync(ct);
+        try
+        {
+            inbox.Submit(await control.Remote.GetRoutes());
+            await Task.WhenAny(control.Completed, reconciling).WaitAsync(ct);
+        }
+        finally
+        {
+            await sessionCts.CancelAsync();
+            await reconciling;
+        }
     }
-    
-    public async Task<ITransport> OpenDataChannelAsync(string host, int port, CancellationToken ct)
+
+    public async Task<ITransport> OpenDataChannelAsync(Guid routeId, CancellationToken ct)
     {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
         var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         try
         {
-            await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), ct);
+            await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), timeout.Token);
+            timeout.CancelAfter(Timeout.InfiniteTimeSpan);
 
             var transport = new Transport(socket, true);
-            FrameCodec.Write(transport.Output, new Frame.Open(host, port));
+            FrameCodec.Write(transport.Output, new Frame.Open(routeId));
             await transport.Output.FlushAsync(ct);
             return transport;
         }
