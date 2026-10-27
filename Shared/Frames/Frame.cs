@@ -2,16 +2,22 @@ namespace Shared.Frames;
 
 public abstract record Frame
 {
-    public const byte Terminator = (byte)';';
-    public const int MaxLength = 265;
+    public const char Terminator = ';';
+    public const char Delimiter = ',';
+    public const int MaxLength = 44;
 
-    // CONN;
-    // 4 + 1 = 5 
-    // Requests first (= Control) channel
+    // CONNECT;
+    // 7 +    1 = 8 
+    // Requests first (= Control) Channel
     public sealed record Connect : Frame;
 
-    // OPEN,hostname,port;
-    // 4 +  <=255 +  <=5+1 = up to 265 
-    // Requests data channel
+    // OPEN,route_id;
+    // 4 + 1 + 36 + 1 = 42
+    // Requests Data Channel
     public sealed record Open(Guid RouteId) : Frame;
+
+    // ACCEPT,reservation_id;
+    // 6 +   1 + 36 +       1 = 44 
+    // Accepts Data Channel as a target peer
+    public sealed record Accept(Guid ReservationId) : Frame;
 }

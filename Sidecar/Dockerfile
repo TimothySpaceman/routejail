@@ -17,8 +17,29 @@ FROM mcr.microsoft.com/dotnet/runtime:10.0 AS final
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        curl \
+        wget \
+        socat \
         dnsutils \
         netcat-openbsd \
+        iproute2 \
+        iputils-ping \
+        traceroute \
+        tcpdump \
+        nmap \
+        net-tools \
+        procps \
+        psmisc \
+        lsof \
+        strace \
+        gdb \
+        file \
+        less \
+        vim-tiny \
+        jq \
+        openssl \
+        ca-certificates \
+        bind9-host \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

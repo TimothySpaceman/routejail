@@ -10,7 +10,7 @@ public static class FrameCodec
     {
         var reader = new SequenceReader<byte>(buffer);
 
-        if (!reader.TryReadTo(out ReadOnlySequence<byte> data, Frame.Terminator))
+        if (!reader.TryReadTo(out ReadOnlySequence<byte> data, (byte)Frame.Terminator))
         {
             if (buffer.Length > Frame.MaxLength) throw new InvalidDataException("Frame too long");
 
@@ -25,21 +25,26 @@ public static class FrameCodec
 
     private static Frame Parse(string text)
     {
-        var parts = text.Split(',');
+        var parts = text.Split(Frame.Delimiter);
         return parts[0] switch
         {
-            "CONN" when parts.Length == 1 => new Frame.Connect(),
+            "CONNECT" when parts.Length == 1 => new Frame.Connect(),
             "OPEN" when parts.Length == 2 && Guid.TryParse(parts[1], out var id) => new Frame.Open(id),
+            "ACCEPT" when parts.Length == 2 && Guid.TryParse(parts[1], out var id) => new Frame.Accept(id),
             _ => throw new InvalidDataException($"Bad frame: {text}")
         };
     }
 
     public static void Write(IBufferWriter<byte> writer, Frame frame)
     {
+        const char d = Frame.Delimiter;
+        const char t = Frame.Terminator;
+        
         var text = frame switch
         {
-            Frame.Connect => "CONN;",
-            Frame.Open o => $"OPEN,{o.RouteId};",
+            Frame.Connect => $"CONNECT{t}",
+            Frame.Open o => $"OPEN{d}{o.RouteId}{t}",
+            Frame.Accept a => $"ACCEPT{d}{a.ReservationId}{t}",
             _ => throw new ArgumentException("Unencodable frame")
         };
 

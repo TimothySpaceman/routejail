@@ -17,6 +17,11 @@ record ConnectionEntry(Guid Id, Guid PeerId)
     public volatile DataChannel? Channel;
 }
 
+record PtpReservation(Guid Id, ITransport SourceTransport, Guid SourceConnectionId, Guid DestinationPeerId)
+{
+    public TaskCompletionSource Tsc { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
 public sealed class RouterWorker : BackgroundService
 {
     private readonly ConcurrentDictionary<Guid, PeerListener> _listeners = new();
@@ -26,21 +31,24 @@ public sealed class RouterWorker : BackgroundService
     private readonly ConcurrentDictionary<Guid, ControlChannel<IRouterControlApi, ISidecarControlApi>>
         _controlChannels = new();
 
+    private readonly ConcurrentDictionary<Guid, PtpReservation> _ptpReservations = new();
+
     private readonly ILogger<RouterWorker> _log;
-    private readonly string _path;
 
     public RouterWorker(IConfiguration config, ILogger<RouterWorker> log)
     {
-        _path = config["Router:SocketPath"] ?? "/tmp/router.sock";
         _log = log;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        string[] paths = [_path];
-        foreach (var path in paths)
+        (string, Guid)[] knownPeers =
+        [
+            ("/run/rjail/a.sock", TempPolicy.PeerA),
+            ("/run/rjail/b.sock", TempPolicy.PeerB)
+        ];
+        foreach (var (path, id) in knownPeers)
         {
-            var id = TempPolicy.PeerA;
             StartListener(id, path, stoppingToken);
         }
 
@@ -125,6 +133,7 @@ public sealed class RouterWorker : BackgroundService
                         _log.LogWarning("Peer {Peer} already has a control connection established", peerId);
                         break;
                     }
+
                     await HandleControlConnectionAsync(peerId, transport, ct);
                     break;
                 }
@@ -132,6 +141,12 @@ public sealed class RouterWorker : BackgroundService
                 case Frame.Open open:
                 {
                     await HandleDataConnectionAsync(entry, open, transport, timeout, ct);
+                    break;
+                }
+
+                case Frame.Accept accept:
+                {
+                    await HandlePtpConnectionAsync(entry, accept, transport, timeout, ct);
                     break;
                 }
             }
@@ -191,30 +206,107 @@ public sealed class RouterWorker : BackgroundService
 
         if (!TempPolicy.TryResolve(entry.PeerId, frame.RouteId, out var dest))
         {
-            _log.LogWarning("Connection from {Peer} to {Route} is not allowed by current policy", entry.PeerId, frame.RouteId);
+            _log.LogWarning("Connection from {Peer} to {Route} is not allowed by current policy", entry.PeerId,
+                frame.RouteId);
             return;
         }
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, control.Cts.Token, timeout.Token);
 
-        timeout.CancelAfter(TimeSpan.FromSeconds(5)); // restart the clock for the outbound connect
-        var outbound = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        if (dest.DestinationPeerId is not null)
+        {
+            timeout.CancelAfter(Timeout.InfiniteTimeSpan); // Don't figure out yet how to do it properly
+            if (!_controlChannels.TryGetValue(dest.DestinationPeerId.Value, out var destControl)) return;
+            var id = Guid.NewGuid();
+            var reservation = new PtpReservation(id, transport, entry.Id, dest.DestinationPeerId.Value);
+            _ptpReservations[id] = reservation;
+            try
+            {
+                await destControl.Remote.AcceptDataConnection(id, dest.Host, dest.TargetPort, cts.Token);
+                if (_ptpReservations.TryRemove(KeyValuePair.Create(id, reservation)))
+                {
+                    throw new IOException("Peer haven't accepted the data connection");
+                }
+
+                await reservation.Tsc.Task.WaitAsync(cts.Token);
+            }
+            finally
+            {
+                _ptpReservations.TryRemove(KeyValuePair.Create(id, reservation));
+            }
+        }
+        else
+        {
+            timeout.CancelAfter(TimeSpan.FromSeconds(5)); // restart the clock for the outbound connect
+            var outbound = new Socket(SocketType.Stream, ProtocolType.Tcp);
+            try
+            {
+                await outbound.ConnectAsync(dest.Host, dest.TargetPort, cts.Token);
+            }
+            catch
+            {
+                outbound.Dispose();
+                throw;
+            }
+
+            timeout.CancelAfter(Timeout.InfiniteTimeSpan);
+            await using var upstream = new Transport(outbound, true);
+
+            await using var channel = DataChannel.Start(transport, upstream, cts.Token);
+            entry.Channel = channel;
+            await channel.Transferring.WaitAsync(cts.Token);
+            _log.LogInformation("Transfer task returned");
+        }
+    }
+
+    private async Task HandlePtpConnectionAsync(
+        ConnectionEntry entry,
+        Frame.Accept frame,
+        ITransport transport,
+        CancellationTokenSource timeout,
+        CancellationToken ct
+    )
+    {
+        timeout.CancelAfter(Timeout.InfiniteTimeSpan); // Don't figure out yet how to do it properly
+        if (!_controlChannels.TryGetValue(entry.PeerId, out var control))
+        {
+            _log.LogError("Cannot establish Data Connection without Control Connection");
+            return;
+        }
+
+        if (
+            !_ptpReservations.TryGetValue(frame.ReservationId, out var reservation) ||
+            entry.PeerId != reservation.DestinationPeerId
+        )
+        {
+            _log.LogError("P2P reservation {Reservation} for peer {Peer} not found", frame.ReservationId, entry.PeerId);
+            return;
+        }
+
+        if (!_ptpReservations.TryRemove(KeyValuePair.Create(frame.ReservationId, reservation))) return;
+
         try
         {
-            await outbound.ConnectAsync(dest.Host, dest.Port, cts.Token);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, control.Cts.Token, timeout.Token);
+            await using var channel = DataChannel.Start(reservation.SourceTransport, transport, cts.Token);
+            entry.Channel = channel;
+            if (_connections.TryGetValue(reservation.SourceConnectionId, out var sourceEntry))
+            {
+                sourceEntry.Channel = channel;
+            }
+
+            await channel.Transferring.WaitAsync(cts.Token);
+            reservation.Tsc.TrySetResult();
         }
-        catch
+        catch (OperationCanceledException)
         {
-            outbound.Dispose();
+            reservation.Tsc.TrySetCanceled();
             throw;
         }
-
-        timeout.CancelAfter(Timeout.InfiniteTimeSpan);
-        await using var upstream = new Transport(outbound, true);
-
-        await using var channel = DataChannel.Start(transport, upstream, cts.Token);
-        entry.Channel = channel;
-        await channel.Transferring.WaitAsync(cts.Token);
-        _log.LogInformation("Transfer task returned");
+        catch (Exception ex)
+        {
+            reservation.Tsc.TrySetException(ex);
+            throw;
+        }
     }
 }

@@ -3,25 +3,27 @@ services:
     build:
       context: .
       dockerfile: Router/Dockerfile
-    command: "dotnet Router.dll --Router:SocketPath=/run/rjail/router.sock"
+    command: "dotnet Router.dll"
     volumes:
       - rjail:/run/rjail
-    healthcheck:
-      test: ["CMD", "test", "-S", "/run/rjail/router.sock"]
-      interval: 1s
-      retries: 30
 
-  sidecar:
+  sidecar-a:
     build:
       context: .
       dockerfile: Sidecar/Dockerfile
-    command: "dotnet Sidecar.dll --Sidecar:SocketPath=/run/rjail/router.sock"
+    command: "dotnet Sidecar.dll --Sidecar:SocketPath=/run/rjail/a.sock"
     volumes:
       - rjail:/run/rjail
     dns: 127.0.0.53
-    depends_on:
-      router:
-        condition: service_healthy
+        
+  sidecar-b:
+    build:
+      context: .
+      dockerfile: Sidecar/Dockerfile
+    command: "dotnet Sidecar.dll --Sidecar:SocketPath=/run/rjail/b.sock"
+    volumes:
+      - rjail:/run/rjail
+    dns: 127.0.0.53
 
 volumes:
   rjail:

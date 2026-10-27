@@ -4,11 +4,16 @@ using Sidecar.Routing;
 
 namespace Sidecar.Control;
 
-public class SidecarControlApi(RouteInbox inbox) : ISidecarControlApi
+public class SidecarControlApi(RouteInbox inbox, Func<Guid, string, int, CancellationToken, Task> acceptData) : ISidecarControlApi
 {
-    public Task ApplyRoutes(RouteSnapshot s)
+    public Task ApplyRoutes(RouteSnapshot s, CancellationToken ct)
     {
         inbox.Submit(s);
         return Task.CompletedTask;
+    }
+
+    public async Task AcceptDataConnection(Guid reservationId, string host, int port, CancellationToken ct)
+    {
+        await acceptData(reservationId, host, port, ct);
     }
 }
