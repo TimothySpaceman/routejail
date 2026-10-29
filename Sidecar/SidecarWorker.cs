@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using Shared.Channels;
 using Shared.Control;
 using Shared.Frames;
+using Shared.Routing;
 using Shared.Transport;
 using Sidecar.Control;
 using Sidecar.Dns;
@@ -71,10 +72,8 @@ public sealed class SidecarWorker : BackgroundService
             transport,
             new SidecarControlApi(
                 inbox,
-                (reservationId, host, port, rpcCt) => AcceptPtpChannelAsync(
-                    reservationId,
-                    host,
-                    port,
+                (reservationId, host, port, protocol, rpcCt) => AcceptPtpChannelAsync(
+                    reservationId, host, port, protocol,
                     CancellationTokenSource.CreateLinkedTokenSource(rpcCt, sessionCts.Token).Token
                 )
             )
@@ -140,9 +139,7 @@ public sealed class SidecarWorker : BackgroundService
     }
 
     private async Task AcceptPtpChannelAsync(
-        Guid reservationId,
-        string host,
-        int port,
+        Guid reservationId, string host, int port, RouteProtocol protocol,
         CancellationToken ct
     )
     {
@@ -151,11 +148,21 @@ public sealed class SidecarWorker : BackgroundService
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(5));
 
-        var outbound = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        await using ITransport upstream = protocol == RouteProtocol.Udp
+            ? await DatagramTransport.ConnectUdpAsync(host, port, DatagramTransport.DefaultIdle, ct)
+            : await ConnectTcpAsync(host, port, timeout.Token);
+        await using var downstream = await AcceptDataChannelAsync(reservationId, ct);
 
+        await using var channel = DataChannel.Start(downstream, upstream, ct);
+        await channel.Transferring.WaitAsync(ct);
+    }
+
+    private static async Task<ITransport> ConnectTcpAsync(string host, int port, CancellationToken ct)
+    {
+        var outbound = new Socket(SocketType.Stream, ProtocolType.Tcp);
         try
         {
-            await outbound.ConnectAsync(host, port, timeout.Token);
+            await outbound.ConnectAsync(host, port, ct);
         }
         catch
         {
@@ -163,10 +170,6 @@ public sealed class SidecarWorker : BackgroundService
             throw;
         }
 
-        await using var upstream = new Transport(outbound, true);
-        await using var downstream = await AcceptDataChannelAsync(reservationId, ct);
-
-        await using var channel = DataChannel.Start(downstream, upstream, ct);
-        await channel.Transferring.WaitAsync(ct);
+        return new Transport(outbound, true);
     }
 }

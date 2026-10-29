@@ -5,6 +5,7 @@ using Router.Policies;
 using Shared.Channels;
 using Shared.Control;
 using Shared.Frames;
+using Shared.Routing;
 using Shared.Transport;
 
 namespace Router;
@@ -222,7 +223,7 @@ public sealed class RouterWorker : BackgroundService
             _ptpReservations[id] = reservation;
             try
             {
-                await destControl.Remote.AcceptDataConnection(id, dest.Host, dest.TargetPort, cts.Token);
+                await destControl.Remote.AcceptDataConnection(id, dest.Host, dest.TargetPort, dest.Protocol, cts.Token);
                 if (_ptpReservations.TryRemove(KeyValuePair.Create(id, reservation)))
                 {
                     throw new IOException("Peer haven't accepted the data connection");
@@ -234,6 +235,20 @@ public sealed class RouterWorker : BackgroundService
             {
                 _ptpReservations.TryRemove(KeyValuePair.Create(id, reservation));
             }
+        }
+        else if (dest.Protocol == RouteProtocol.Udp)
+        {
+            timeout.CancelAfter(TimeSpan.FromSeconds(5));
+            await using var upstream = await DatagramTransport.ConnectUdpAsync(
+                dest.Host,
+                dest.TargetPort,
+                DatagramTransport.DefaultIdle,
+                cts.Token
+            );
+            timeout.CancelAfter(Timeout.InfiniteTimeSpan);
+            await using var channel = DataChannel.Start(transport, upstream, cts.Token);
+            entry.Channel = channel;
+            await channel.Transferring.WaitAsync(cts.Token);
         }
         else
         {
