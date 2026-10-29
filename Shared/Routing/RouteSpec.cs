@@ -1,5 +1,8 @@
+using System.Text.Json.Serialization;
+
 namespace Shared.Routing;
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum RouteProtocol
 {
     Tcp,

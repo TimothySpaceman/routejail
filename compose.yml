@@ -4,6 +4,8 @@ services:
       context: .
       dockerfile: Router/Dockerfile
     command: "dotnet Router.dll"
+    ports:
+      - "5010:5000"
     volumes:
       - rjail:/run/rjail
 

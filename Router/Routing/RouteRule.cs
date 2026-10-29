@@ -1,6 +1,6 @@
 using Shared.Routing;
 
-namespace Router.Policies;
+namespace Router.Routing;
 
 public sealed record RouteRule(
     Guid Id,

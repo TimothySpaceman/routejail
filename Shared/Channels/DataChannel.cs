@@ -10,8 +10,22 @@ public class DataChannel : IAsyncDisposable
     private readonly ITransport _peerB;
     private readonly CancellationTokenSource _cts;
     private int _disposed;
+    private long _bytesIn;
+    private long _bytesOut;
+    private long _lastActivityTicks;
 
     public Task Transferring { get; private set; } = Task.CompletedTask;
+
+    public long BytesIn => Volatile.Read(ref _bytesIn);
+    public long BytesOut => Volatile.Read(ref _bytesOut);
+    public DateTimeOffset? LastActivity
+    {
+        get
+        {
+            var ticks = Volatile.Read(ref _lastActivityTicks);
+            return ticks == 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero);
+        }
+    }
 
     private DataChannel(ITransport peerA, ITransport peerB, CancellationTokenSource cts)
     {
@@ -30,12 +44,12 @@ public class DataChannel : IAsyncDisposable
     private async Task RunAsync()
     {
         await Task.WhenAll(
-            TransferData(_peerA.Input, _peerB.Output, _cts),
-            TransferData(_peerB.Input, _peerA.Output, _cts)
+            TransferData(_peerA.Input, _peerB.Output, _cts, isDirectionIn: true),
+            TransferData(_peerB.Input, _peerA.Output, _cts, isDirectionIn: false)
         );
     }
 
-    private async Task TransferData(PipeReader source, PipeWriter destination, CancellationTokenSource abort)
+    private async Task TransferData(PipeReader source, PipeWriter destination, CancellationTokenSource abort, bool isDirectionIn)
     {
         // Might access some Channel State like interference config to interact with the data being transfered
         // Thus, cannot be static
@@ -48,12 +62,26 @@ public class DataChannel : IAsyncDisposable
                 var result = await source.ReadAsync(ct);
                 if (result.IsCanceled) break;
 
+                var bytes = result.Buffer.Length;
                 foreach (var segment in result.Buffer)
                 {
                     destination.Write(segment.Span);
                 }
 
                 source.AdvanceTo(result.Buffer.End);
+
+                if (bytes > 0)
+                {
+                    if (isDirectionIn)
+                    {
+                        Interlocked.Add(ref _bytesIn, bytes);
+                    }
+                    else
+                    {
+                        Interlocked.Add(ref _bytesOut, bytes);
+                    }
+                    Interlocked.Exchange(ref _lastActivityTicks, DateTimeOffset.UtcNow.UtcTicks);
+                }
 
                 var flush = await destination.FlushAsync(ct);
                 if (flush.IsCanceled || flush.IsCompleted || result.IsCompleted) break;
