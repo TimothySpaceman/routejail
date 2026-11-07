@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net.Sockets;
 using Shared.Channels;
 using Shared.Control;
@@ -6,6 +7,7 @@ using Shared.Routing;
 using Shared.Transport;
 using Sidecar.Control;
 using Sidecar.Dns;
+using Sidecar.Relay;
 using Sidecar.Routing;
 
 namespace Sidecar;
@@ -22,19 +24,59 @@ public sealed class SidecarWorker : BackgroundService
         _socketPath = config["Sidecar:SocketPath"] ?? "/tmp/router.sock";
         _dns = dns;
         _log = log;
-        
+
         var statsPath = config["Sidecar:StatsPath"];
         if (!string.IsNullOrEmpty(statsPath))
         {
             var proc = System.Diagnostics.Process.GetCurrentProcess();
             _stats = new Timer(_ =>
             {
-                proc.Refresh();
-                var t = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
-                File.AppendAllText(statsPath,
-                    $"{{\"t\":{t},\"cpu_ns\":{(long)(proc.TotalProcessorTime.TotalMilliseconds * 1e6)},\"rss_kb\":{proc.WorkingSet64 / 1024},\"hwm_kb\":{proc.PeakWorkingSet64 / 1024},\"conns\":0}}\n");
+                try
+                {
+                    proc.Refresh();
+                    var t = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0).ToString("F3",
+                        System.Globalization.CultureInfo.InvariantCulture);
+                    var conns = ActiveConnections.Count;
+                    var pss = ReadPssKb();
+                    var pssField = pss is null ? "" : $",\"pss_kb\":{pss}";
+                    File.AppendAllText(
+                        statsPath,
+                        $"{{\n" +
+                        $"\"t\": {t},\n" +
+                        $"\"cpu_ns\":{(long)(proc.TotalProcessorTime.TotalMilliseconds * 1e6)},\n" +
+                        $"\"rss_kb\":{proc.WorkingSet64 / 1024},\n" +
+                        $"\"hwm_kb\":{proc.PeakWorkingSet64 / 1024},\n" +
+                        $"\"conns\":{conns}{pssField}\n" +
+                        $"}}\n"
+                    );
+                }
+                catch
+                {
+                    // ignored
+                }
             }, null, 0, 1000);
         }
+    }
+
+    private static long? ReadPssKb()
+    {
+        try
+        {
+            foreach (var line in File.ReadLines("/proc/self/smaps_rollup"))
+            {
+                if (!line.StartsWith("Pss:", StringComparison.Ordinal)) continue;
+                var value = line.AsSpan(4).Trim();
+                var end = value.IndexOf(' ');
+                if (end >= 0) value = value[..end];
+                return long.TryParse(value, out var kb) ? kb : null;
+            }
+        }
+        catch
+        {
+            // ignored
+        }
+
+        return null;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -73,8 +115,17 @@ public sealed class SidecarWorker : BackgroundService
     private async Task RunSessionAsync(CancellationToken ct)
     {
         var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-        await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), ct);
-        await using var transport = new Transport(socket, false);
+        try
+        {
+            await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), ct);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+
+        await using var transport = new Transport(socket, true);
 
         FrameCodec.Write(transport.Output, new Frame.Connect());
         await transport.Output.FlushAsync(ct);
@@ -93,7 +144,7 @@ public sealed class SidecarWorker : BackgroundService
             )
         );
 
-        var reconciler = new DnsManager(inbox, _dns, OpenDataChannelAsync, _log);
+        var reconciler = new DnsManager(inbox, _dns, OpenDataChannelAsync, OpenDataSocketAsync, _log);
         var reconciling = reconciler.RunAsync(sessionCts.Token);
 
         try
@@ -152,6 +203,39 @@ public sealed class SidecarWorker : BackgroundService
         }
     }
 
+    private Task<Socket> OpenDataSocketAsync(Guid routeId, CancellationToken ct) =>
+        ConnectDataSocketAsync(new Frame.Open(routeId), ct);
+
+    private Task<Socket> AcceptDataSocketAsync(Guid reservationId, CancellationToken ct) =>
+        ConnectDataSocketAsync(new Frame.Accept(reservationId), ct);
+
+    private async Task<Socket> ConnectDataSocketAsync(Frame frame, CancellationToken ct)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        try
+        {
+            await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), timeout.Token);
+            timeout.CancelAfter(Timeout.InfiniteTimeSpan);
+
+            var header = new ArrayBufferWriter<byte>(Frame.MaxLength);
+            FrameCodec.Write(header, frame);
+            var sent = 0;
+            while (sent < header.WrittenCount)
+            {
+                sent += await socket.SendAsync(header.WrittenMemory[sent..], SocketFlags.None, ct);
+            }
+
+            return socket;
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
+
     private async Task AcceptPtpChannelAsync(
         Guid reservationId, string host, int port, RouteProtocol protocol,
         CancellationToken ct
@@ -162,16 +246,31 @@ public sealed class SidecarWorker : BackgroundService
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(5));
 
-        await using ITransport upstream = protocol == RouteProtocol.Udp
-            ? await DatagramTransport.ConnectUdpAsync(host, port, DatagramTransport.DefaultIdle, ct)
-            : await ConnectTcpAsync(host, port, timeout.Token);
-        await using var downstream = await AcceptDataChannelAsync(reservationId, ct);
+        if (protocol == RouteProtocol.Tcp)
+        {
+            using var upstream = await ConnectTcpAsync(host, port, timeout.Token);
+            using var downstream = await AcceptDataSocketAsync(reservationId, ct);
+            await new SocketRelay().RunAsync(downstream, upstream, ct);
+            return;
+        }
 
-        await using var channel = DataChannel.Start(downstream, upstream, ct);
-        await channel.Transferring.WaitAsync(ct);
+        await using var udpUpstream =
+            await DatagramTransport.ConnectUdpAsync(host, port, DatagramTransport.DefaultIdle, ct);
+        await using var udpDownstream = await AcceptDataChannelAsync(reservationId, ct);
+
+        ActiveConnections.Enter();
+        try
+        {
+            await using var channel = DataChannel.Start(udpDownstream, udpUpstream, ct);
+            await channel.Transferring.WaitAsync(ct);
+        }
+        finally
+        {
+            ActiveConnections.Exit();
+        }
     }
 
-    private static async Task<ITransport> ConnectTcpAsync(string host, int port, CancellationToken ct)
+    private static async Task<Socket> ConnectTcpAsync(string host, int port, CancellationToken ct)
     {
         var outbound = new Socket(SocketType.Stream, ProtocolType.Tcp);
         try
@@ -185,6 +284,6 @@ public sealed class SidecarWorker : BackgroundService
             throw;
         }
 
-        return new Transport(outbound, true);
+        return outbound;
     }
 }

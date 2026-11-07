@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using Shared.Channels;
 using Shared.Routing;
 using Shared.Transport;
+using Sidecar.Relay;
 using Sidecar.Routing;
 using System.Threading.Channels;
 
@@ -32,6 +33,7 @@ public class DnsManager(
     RouteInbox inbox,
     DnsServer dns,
     Func<Guid, CancellationToken, Task<ITransport>> openData,
+    Func<Guid, CancellationToken, Task<Socket>> openDataSocket,
     ILogger log
 )
 {
@@ -217,6 +219,7 @@ public class DnsManager(
         Channel<byte[]> flowInbox, Action unregister, CancellationToken ct
     )
     {
+        ActiveConnections.Enter();
         try
         {
             await using var data = await openData(spec.Id, ct);
@@ -246,6 +249,7 @@ public class DnsManager(
         }
         finally
         {
+            ActiveConnections.Exit();
             unregister();
         }
     }
@@ -257,14 +261,13 @@ public class DnsManager(
         CancellationToken ct
     )
     {
-        var app = new Transport(appSocket, true);
+        Socket? socket = null;
         try
         {
-            await using var data = await openData(spec.Id, ct);
-            await using var channel = DataChannel.Start(app, data, ct);
-            await channel.Transferring.WaitAsync(ct);
+            socket = await openDataSocket(spec.Id, ct);
+            await new SocketRelay().RunAsync(appSocket, socket, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
         }
         catch (Exception ex)
@@ -282,14 +285,8 @@ public class DnsManager(
         finally
         {
             unregister();
-            try
-            {
-                await app.DisposeAsync();
-            }
-            catch (Exception ex)
-            {
-                log.LogWarning(ex, "Transport dispose failed");
-            }
+            socket?.Dispose();
+            appSocket.Dispose();
         }
     }
 }

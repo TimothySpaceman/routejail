@@ -388,7 +388,7 @@ public sealed class RouterWorker : BackgroundService, IPeerListenerManager
             await using var channel = DataChannel.Start(transport, upstream, cts.Token);
             entry.Channel = channel;
             await channel.Transferring.WaitAsync(cts.Token);
-            _log.LogInformation("Transfer task returned");
+            _log.LogDebug("Transfer task returned");
         }
     }
 
