@@ -368,6 +368,7 @@ public sealed class RouterWorker : BackgroundService, IPeerListenerManager
             try
             {
                 await outbound.ConnectAsync(dest.Host, dest.TargetPort, cts.Token);
+                outbound.NoDelay = true;
             }
             catch
             {

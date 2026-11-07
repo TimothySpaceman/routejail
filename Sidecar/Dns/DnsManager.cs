@@ -139,6 +139,7 @@ public class DnsManager(
             while (!ct.IsCancellationRequested)
             {
                 var app = await listener.AcceptAsync(ct);
+                app.NoDelay = true;
                 var id = Guid.NewGuid();
                 var entry = new ConnectionEntry();
                 connections[id] = entry;

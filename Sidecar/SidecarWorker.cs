@@ -15,12 +15,26 @@ public sealed class SidecarWorker : BackgroundService
     private readonly DnsServer _dns;
     private readonly ILogger<SidecarWorker> _log;
     private readonly string _socketPath;
+    private Timer? _stats;
 
     public SidecarWorker(IConfiguration config, DnsServer dns, ILogger<SidecarWorker> log)
     {
         _socketPath = config["Sidecar:SocketPath"] ?? "/tmp/router.sock";
         _dns = dns;
         _log = log;
+        
+        var statsPath = config["Sidecar:StatsPath"];
+        if (!string.IsNullOrEmpty(statsPath))
+        {
+            var proc = System.Diagnostics.Process.GetCurrentProcess();
+            _stats = new Timer(_ =>
+            {
+                proc.Refresh();
+                var t = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+                File.AppendAllText(statsPath,
+                    $"{{\"t\":{t},\"cpu_ns\":{(long)(proc.TotalProcessorTime.TotalMilliseconds * 1e6)},\"rss_kb\":{proc.WorkingSet64 / 1024},\"hwm_kb\":{proc.PeakWorkingSet64 / 1024},\"conns\":0}}\n");
+            }, null, 0, 1000);
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -163,6 +177,7 @@ public sealed class SidecarWorker : BackgroundService
         try
         {
             await outbound.ConnectAsync(host, port, ct);
+            outbound.NoDelay = true;
         }
         catch
         {
