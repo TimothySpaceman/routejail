@@ -1,0 +1,35 @@
+services:
+  router:
+    build:
+      context: .
+      dockerfile: Router/Dockerfile
+    command: "dotnet Router.dll"
+    ports:
+      - "5010:5000"
+    volumes:
+      - rjail:/run/rjail
+
+  sidecar-a:
+    build:
+      context: .
+      dockerfile: Sidecar/Dockerfile
+    command: "dotnet Sidecar.dll --Sidecar:SocketPath=/run/rjail/a.sock"
+    volumes:
+      - rjail:/run/rjail
+    dns: 127.0.0.53
+        
+  sidecar-b:
+    build:
+      context: .
+      dockerfile: Sidecar/Dockerfile
+    command: "dotnet Sidecar.dll --Sidecar:SocketPath=/run/rjail/b.sock"
+    volumes:
+      - rjail:/run/rjail
+    dns: 127.0.0.53
+
+volumes:
+  rjail:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
