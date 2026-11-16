@@ -41,13 +41,13 @@ public sealed class SidecarWorker : BackgroundService
                     var pssField = pss is null ? "" : $",\"pss_kb\":{pss}";
                     File.AppendAllText(
                         statsPath,
-                        $"{{\n" +
-                        $"\"t\": {t},\n" +
-                        $"\"cpu_ns\":{(long)(proc.TotalProcessorTime.TotalMilliseconds * 1e6)},\n" +
-                        $"\"rss_kb\":{proc.WorkingSet64 / 1024},\n" +
-                        $"\"hwm_kb\":{proc.PeakWorkingSet64 / 1024},\n" +
-                        $"\"conns\":{conns}{pssField}\n" +
-                        $"}}\n"
+                        $"{{" +
+                        $"\"t\": {t}," +
+                        $"\"cpu_ns\":{(long)(proc.TotalProcessorTime.TotalMilliseconds * 1e6)}," +
+                        $"\"rss_kb\":{proc.WorkingSet64 / 1024}," +
+                        $"\"hwm_kb\":{proc.PeakWorkingSet64 / 1024}," +
+                        $"\"conns\":{conns}{pssField}" +
+                        $"}}"
                     );
                 }
                 catch
